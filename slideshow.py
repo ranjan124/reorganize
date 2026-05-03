@@ -1,135 +1,97 @@
 import os
 import subprocess
+import time
 
-# -------- CONFIG --------
-ROOT_DIR = r"F:\toupload\temp"
+# CONFIG
+BASE_DIR = r"F:\toupload\organized"
+FFMPEG = r"D:\playground\videosplitter\media-tool\ffmpeg.exe"
+DURATION = 3  # seconds per image
 
-IMAGE_EXT = {".jpg", ".jpeg", ".png"}
-DURATION_PER_IMAGE = 5
+def get_date_from_filename(filename):
+    try:
+        y, m, d = filename.split("-")[0].split(".")
+        return f"{d}.{m}.{y}"  # <-- changed format
+    except:
+        return "unknown"
 
-DRY_RUN = False
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FFMPEG_PATH = os.path.join(BASE_DIR, "media-tool", "ffmpeg.exe")
-# ------------------------
-
-
-def log(msg):
-    print(msg, flush=True)
-
-
-def check_ffmpeg():
-    return os.path.exists(FFMPEG_PATH)
-
-
-def is_image_file(name):
-    return "-image-" in name and os.path.splitext(name)[1].lower() in IMAGE_EXT
-
-
-def extract_date(filename):
-    return filename.split("-image-")[0]
-
-
-def collect_images(folder):
-    images = []
-    for f in os.listdir(folder):
-        if is_image_file(f):
-            images.append(os.path.join(folder, f))
-    return sorted(images)
-
-
-def build_filter(images):
-    """
-    Create per-image overlays using concat + drawtext index trick
-    """
-
+def create_slideshow(images, output_file):
+    inputs = []
     filters = []
 
-    for i, img in enumerate(images):
-        name = os.path.basename(img)
-        date = extract_date(name)
+    for i, (img, date) in enumerate(images):
+        inputs += ["-loop", "1", "-t", str(DURATION), "-i", img]
 
         filters.append(
-            f"[{i}:v]scale=trunc(iw/2)*2:trunc(ih/2)*2,"
-            f"drawtext=text='{date}':"
+            f"[{i}:v]"
+            f"scale=1280:720:force_original_aspect_ratio=decrease,"
+            f"pad=1280:720:(ow-iw)/2:(oh-ih)/2,"
+            f"setsar=1,"
+            f"drawtext=text={date}:"
             f"fontcolor=white:fontsize=36:"
             f"x=w-tw-20:y=h-th-20:"
-            f"box=1:boxcolor=black@0.5:boxborderw=10[v{i}]"
+            f"box=1:boxcolor=black@0.5:boxborderw=10"
+            f"[v{i}]"
         )
 
     concat_inputs = "".join([f"[v{i}]" for i in range(len(images))])
+    filter_complex = ";".join(filters) + f";{concat_inputs}concat=n={len(images)}:v=1:a=0[v]"
 
-    filters.append(f"{concat_inputs}concat=n={len(images)}:v=1:a=0[v]")
-
-    return ";".join(filters)
-
-
-def create_slideshow(folder, images):
-    month_name = os.path.basename(folder)
-    output = os.path.join(folder, f"{month_name}-slideshow.mp4")
-
-    if not images:
-        log(f"[SKIP] {month_name} -> no images")
-        return
-
-    # build ffmpeg inputs
-    cmd = [FFMPEG_PATH, "-y"]
-
-    for img in images:
-        cmd += ["-loop", "1", "-t", str(DURATION_PER_IMAGE), "-i", img]
-
-    filter_complex = build_filter(images)
-
-    cmd += [
+    cmd = [
+        FFMPEG,
+        *inputs,
         "-filter_complex", filter_complex,
         "-map", "[v]",
-        "-r", "30",
-        "-c:v", "libx264",
+        "-vsync", "2",
         "-pix_fmt", "yuv420p",
-        "-movflags", "+faststart",
-        output
+        "-y",
+        output_file
     ]
-
-    if DRY_RUN:
-        log(f"[DRY RUN] {output} ({len(images)} images)")
-        return
-
-    log(f"[CREATE] {output} ({len(images)} images)")
 
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
-        log("[FFMPEG ERROR]")
-        log(result.stderr)
-    else:
-        log(f"[DONE] {output}")
+        print("[FFMPEG ERROR]")
+        print(result.stderr)
+        return False
 
+    return True
 
-def process_month(folder):
-    images = collect_images(folder)
+def main():
+    print("[START]", BASE_DIR)
+    print("[INFO] Using FFmpeg:", FFMPEG)
 
-    log(f"[MONTH] {os.path.basename(folder)} -> {len(images)} images")
+    total_start = time.time()
 
-    for img in images:
-        log(f"[IMG] {os.path.basename(img)} -> {extract_date(os.path.basename(img))}")
+    for month in sorted(os.listdir(BASE_DIR)):
+        month_path = os.path.join(BASE_DIR, month)
+        if not os.path.isdir(month_path):
+            continue
 
-    create_slideshow(folder, images)
+        images = []
+        for file in sorted(os.listdir(month_path)):
+            if file.lower().endswith((".jpg", ".jpeg", ".png")):
+                full_path = os.path.join(month_path, file)
+                date = get_date_from_filename(file)
+                images.append((full_path, date))
+                print("[IMG]", full_path, "->", date)
 
+        if not images:
+            continue
 
-def scan():
-    log(f"[START] {ROOT_DIR}")
+        print(f"[MONTH] {month} -> {len(images)} images")
 
-    if not check_ffmpeg():
-        log(f"[ERROR] FFmpeg not found: {FFMPEG_PATH}")
-        return
+        output_file = os.path.join(month_path, f"{month}-slideshow.mp4")
+        print("[CREATE]", output_file)
 
-    for item in os.listdir(ROOT_DIR):
-        path = os.path.join(ROOT_DIR, item)
-        if os.path.isdir(path):
-            process_month(path)
+        start = time.time()
+        success = create_slideshow(images, output_file)
+        end = time.time()
 
-    log("[DONE]")
+        if success:
+            print(f"[TIME] {month} took {round(end - start, 2)} sec")
 
+    print(f"[TOTAL TIME] {round(time.time() - total_start, 2)} sec")
+    print("[DONE]")
 
 if __name__ == "__main__":
-    scan()
+    main()
